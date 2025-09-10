@@ -6,79 +6,98 @@
   <style>
     html, body { margin:0; background:#000; color:#0f0; font-family: monospace; }
     #screen { display:block; margin:auto; image-rendering: pixelated; }
+    #toolbar { background:#020; padding:4px; color:#9f9; }
   </style>
 </head>
 <body>
-  <canvas id="screen" width="640" height="400"></canvas>
+<div id="toolbar">
+  Mode:
+  <select id="modeSel">
+    <option value="JS_BASIC">JS BASIC</option>
+    <option value="ROM_6502">ROM 6502</option>
+  </select>
+  <button id="resetBtn">Reset</button>
+</div>
+<canvas id="screen" width="640" height="400"></canvas>
 
-  <!-- コアモジュールを読み込み -->
-  <script type="module">
-    import { CPU6502 } from './cpu6502.js';
-    import { Bus } from './bus.js';
-    import { VIA6522 } from './via6522.js';
-    import { TextVideo } from './video.js';
-    import { Keyboard } from './keyboard.js';
-    import { Basic } from './basic.js';
+<script type="module">
+import { CPU6502 } from './cpu6502.js';
+import { Bus } from './bus.js';
+import { VIA6522 } from './via6522.js';
+import { TextVideo } from './video.js';
+import { Keyboard } from './keyboard.js';
+import { TextTerminal } from './terminal.js';
+import { Basic } from './basic.js';
 
-    const canvas = document.getElementById('screen');
+const canvas = document.getElementById('screen');
+const modeSel = document.getElementById('modeSel');
+const resetBtn = document.getElementById('resetBtn');
 
-    // モード切替: JS BASIC or ROM 6502
-    const MODE = 'JS_BASIC'; // 'ROM_6502'
+let rafId = null;
+function stopLoop(){ if (rafId) cancelAnimationFrame(rafId); rafId=null; }
+function startLoop(fn){ function loop(){ fn(); rafId=requestAnimationFrame(loop); } rafId=requestAnimationFrame(loop); }
 
-    if (MODE === 'JS_BASIC') {
-      const term = new TextVideo(canvas, 40, 25); // 簡易端末として利用
-      const basic = new Basic(term);
-      term.clear();
-      term.printLine('*** PET-LIKE BASIC ***');
-      term.printLine('READY.');
-      (async ()=>{
-        while (true) {
-          const line = await term.readLine('> ');
-          try {
-            const res = basic.parseLine(line);
-            if (res.type === 'IMMEDIATE') await basic.execImmediate(res.tokens);
-          } catch (e) {
-            term.printLine('? '+(e.message||e));
-          }
-        }
-      })();
-    } else {
-      // ROM 6502 モード
-      const bus = new Bus();
-      const cpu = new CPU6502(bus);
-      const video = new TextVideo(canvas, 40, 25, 0x8000);
-      video.hook(bus);
-      const via = new VIA6522(cpu);
-      via.hook(bus, 0xE840);
-      const kb = new Keyboard();
-      kb.hook(bus, /*selAddr*/0xE810, /*readAddr*/0xE812);
+async function loadROM(url){
+  const buf = await fetch(url).then(r=>r.arrayBuffer());
+  return new Uint8Array(buf);
+}
 
-      // ROM 読み込み
-      const loadROM = async (addr, url) => {
-        const buf = await fetch(url).then(r=>r.arrayBuffer());
-        bus.mapROM(addr, new Uint8Array(buf));
-      };
-      await loadROM(0xE000, 'editor.rom');
-      await loadROM(0xF000, 'basic.rom');
-      await loadROM(0xF800, 'kernal.rom');
-
-      cpu.reset();
-
-      const CLOCK = 1_000_000, FRAME = 60;
-      const CYCLES_PER_FRAME = Math.floor(CLOCK/FRAME);
-      function frame(){
-        let startCy = cpu.cy;
-        while ((cpu.cy - startCy) < CYCLES_PER_FRAME) {
-          const before = cpu.cy;
-          cpu.step();
-          const delta = cpu.cy - before;
-          via.tick(delta);
-        }
-        video.render(bus);
-        requestAnimationFrame(frame);
-      }
-      requestAnimationFrame(frame);
+async function initJSBasic(){
+  stopLoop();
+  const term = new TextTerminal(canvas);
+  const basic = new Basic(term);
+  term.clear();
+  term.printLine('*** PET-LIKE BASIC ***');
+  term.printLine('READY.');
+  while (true) {
+    const line = await term.readLine('> ');
+    try {
+      const res = basic.parseLine(line);
+      if (res.type === 'IMMEDIATE') await basic.execImmediate(res.tokens);
+    } catch (e) {
+      term.printLine('? '+(e.message||e));
     }
-  </script>
+  }
+}
+
+async function initROM6502(){
+  stopLoop();
+  const bus = new Bus();
+  const cpu = new CPU6502(bus);
+  const video = new TextVideo(canvas, 40, 25, 0x8000);
+  video.hook(bus);
+  const via = new VIA6522(cpu);
+  via.hook(bus, 0xE840);
+  const kb = new Keyboard();
+  kb.hook(bus, 0xE810, 0xE812);
+
+  // ROM読み込み（URLは適宜変更）
+  bus.mapROM(0xE000, await loadROM('editor.rom'));
+  bus.mapROM(0xF000, await loadROM('basic.rom'));
+  bus.mapROM(0xF800, await loadROM('kernal.rom'));
+
+  cpu.reset();
+
+  const CLOCK = 1_000_000, FRAME = 60;
+  const CYCLES_PER_FRAME = Math.floor(CLOCK/FRAME);
+  startLoop(()=>{
+    let startCy = cpu.cy;
+    while ((cpu.cy - startCy) < CYCLES_PER_FRAME) {
+      const before = cpu.cy;
+      cpu.step();
+      const delta = cpu.cy - before;
+      via.tick(delta);
+    }
+    video.render(bus);
+  });
+}
+
+resetBtn.onclick = ()=>{
+  if (modeSel.value === 'JS_BASIC') initJSBasic();
+  else initROM6502();
+};
+
+initJSBasic();
+</script>
 </body>
 </html>
